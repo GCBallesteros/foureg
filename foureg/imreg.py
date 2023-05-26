@@ -439,7 +439,6 @@ def _phase_correlation(im0, im1, callback=None, *args):
     (t0, t1), success = callback(scps, *args)
     ret = np.array((t0, t1))
 
-    # _compensate_fftshift is not appropriate here, this is OK.
     t0 -= f0.shape[0] // 2
     t1 -= f0.shape[1] // 2
 
