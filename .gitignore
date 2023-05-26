@@ -1,0 +1,11 @@
+*~
+*.pyc
+.ropeproject
+.coverage
+*.egg-info
+doc/_build
+build
+dist
+.pypirc
+__pycache__/
+.ipynb_checkpoints/
