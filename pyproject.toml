@@ -4,11 +4,30 @@ version = "0.1.0"
 description = "Fourier transform based image registration"
 authors = ["Guillem Ballesteros <guillem@maxwellrules.com>"]
 readme = "README.md"
+homepage = "https://github.com/GCBallesteros/foureg"
+repository = "https://github.com/GCBallesteros/foureg"
+keywords = [
+  "image registration",
+  "image",
+]
+classifiers = [
+  "Operating System :: OS Independent",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3 :: Only",
+  "License :: OSI Approved :: BSD License",
+  "Intended Audience :: Science/Research",
+  "Topic :: Utilities",
+  "Topic :: Scientific/Engineering :: Image Recognition",
+]
 
 [tool.poetry.dependencies]
 python = ">=3.8,<3.12"
-numpy = "^1.24.3"
-scipy = "^1.10.1"
+numpy = "^1.21"
+scipy = "^1.7"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.3.1"
