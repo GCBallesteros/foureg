@@ -31,7 +31,7 @@
 FFT based image registration. --- utility functions
 """
 import math
-from typing import Optional
+from typing import Iterable, Optional
 
 import numpy as np
 import numpy.fft as fft
@@ -514,7 +514,7 @@ def gaussian_filter(
     return img.squeeze(0).squeeze(0)
 
 
-def frame_img(img, mask, dst, apofield=None):
+def frame_img(img, transform, dst, apofield=None):
     """
     Given an array, a mask (floats between 0 and 1), and a distance, alter the area
     where the mask is low (and roughly within dst from the edge) so it blends well
@@ -531,6 +531,12 @@ def frame_img(img, mask, dst, apofield=None):
         Parameter controlling behavior near edges, value could be probably deduced
         from the mask.
     """
+    # Order of mask should be always 1 - higher values produce strange results.
+    mask = transform_img(torch.ones_like(img), transform, 0, "nearest", invert=False)
+
+    # This removes some weird artifacts
+    mask[mask > 0.8] = 1.0
+
     radius = dst / 1.8
 
     convmask0 = mask + 1e-10
@@ -610,3 +616,87 @@ def map_coordinates(pixel_indices, field, cval=0.0, mode="bilinear"):
     field[out_of_bounds_mask] = cval
 
     return field.squeeze()
+
+
+def similarity_matrix(scale: float, angle: float, tvec: Iterable) -> np.ndarray:
+    # Rotation
+    angle = np.deg2rad(angle)
+    c, s = np.cos(angle), np.sin(angle)
+    r_matrix = np.identity(3)
+    r_matrix[:2, :2] = np.array([[c, -s], [s, c]])
+
+    # Scaling
+    s_matrix = np.identity(3)
+    s_matrix[0, 0] = scale
+    s_matrix[1, 1] = scale
+
+    # Translation
+    t_matrix = np.identity(3)
+    t_matrix[:2, 2] = tvec
+
+    return t_matrix @ r_matrix @ s_matrix
+
+
+def transform_img(
+    img: torch.Tensor,
+    transformation: np.ndarray,
+    bgval: Optional[float] = None,
+    mode: str = "bilinear",
+    invert: bool = False,
+) -> torch.Tensor:
+    """
+    Return translation vector to register images.
+
+    Notes
+    -----
+    The transformation is to be understand on the coordinate axis of natural to an
+    image array. That is, the origin of coordinates is on the top left with the y axis
+    going down and the x axis to the right. Rotations go from x to y and therefore
+    a positive rotation angle will result in an anticlockwise rotation from the point
+    of view of the user when plotting the image but in fact its a clockwise rotation
+    from the point of view of the coordinate system.
+
+    Parameters
+    ----------
+    img
+        What will be transformed.
+        If a 3D array is passed, it is treated in a manner in which RGB
+        images are supposed to be handled - i.e. assume that coordinates
+        are (Y, X, channels).
+        Complex images are handled in a way that treats separately
+        the real and imaginary parts.
+    mode
+        `nearest` or `bilinear`. This are the modes supported by `grid_sample`
+    bgval
+        Shade of the background (filling during transformations)
+        If None is passed, :func:`imreg_dft.utils.get_borderval` with
+        radius of 5 is used to get it.
+
+    Returns
+    -------
+    The transformed image
+
+    """
+    if invert:
+        transformation = np.linalg.inv(transformation)
+
+    if bgval is None:
+        bgval = get_borderval(img)
+
+    transformed_coords = transform_2d_coord_arrays(
+        np.linalg.inv(transformation),
+        np.dstack(
+            np.meshgrid(np.arange(img.shape[1]), np.arange(img.shape[0]), indexing="xy")
+        ),
+    )
+    transformed_coords = torch.tensor(transformed_coords).type(torch.float32)
+    slave_transformed = map_coordinates(
+        transformed_coords,
+        img,
+        cval=float(bgval),
+        mode=mode,
+    )
+
+    dest = slave_transformed
+
+    return dest

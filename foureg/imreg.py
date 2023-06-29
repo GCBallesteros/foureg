@@ -34,7 +34,7 @@
 FFT based image registration. --- main functions
 """
 from copy import deepcopy
-from typing import Any, Iterable, Optional
+from typing import Any, Optional
 
 import numpy as np
 import torch
@@ -42,6 +42,7 @@ import torch
 import foureg.utils as utils
 
 from .constraints import Constraints
+from .result import Result
 
 EXCESS_CONST = 1.1
 PI = torch.pi
@@ -214,7 +215,7 @@ def _similarity(
     filter_pcorr: int = 0,
     exponent: float = torch.inf,
     bgval: Optional[float] = None,
-) -> dict[str, Any]:
+) -> Result:
     """
     This function takes some input and returns mutual rotation, scale and translation.
 
@@ -265,10 +266,12 @@ def _similarity(
 
         # transform_img understand the angle the other way around hence the minus
         # sign below
-        transformation = similarity_matrix(scale, -angle, (0, 0))
+        transformation = utils.similarity_matrix(scale, -angle, (0, 0))
 
         # False because we're transforming the slave to be closer to the master
-        im2 = transform_img(im1, transformation, bgval=bgval, mode=mode, invert=False)
+        im2 = utils.transform_img(
+            im1, transformation, bgval=bgval, mode=mode, invert=False
+        )
 
     # Here we look how is the turn-180
     target, stdev = constraints.angle
@@ -290,10 +293,15 @@ def _similarity(
 
     # transform_img understand the angle the other way around hence the minus sign
     # below
-    affine = similarity_matrix(scale, -res["angle"], res["tvec"])
-
-    # 0.25 because we go subpixel now
-    res = {"transformation": affine, "Dscale": Dscale, "Dangle": Dangle, "Dt": 0.25}
+    # dt 0.25 because we go subpixel now (???)
+    res = Result(
+        angle=-res["angle"],
+        scale=scale,
+        tvec=res["tvec"],
+        dscale=Dscale,
+        dangle=Dangle,
+        dt=0.25,
+    )
 
     return res
 
@@ -306,7 +314,7 @@ def similarity(
     constraints: Constraints = Constraints(),
     filter_pcorr: int = 0,
     exponent: float = torch.inf,
-) -> dict[str, Any]:
+) -> Result:
     """
     Return similarity transformed image im1 and transformation parameters.
     Transformation parameters are: isotropic scale factor, rotation angle (in
@@ -363,19 +371,6 @@ def similarity(
     res = _similarity(
         im0, im1, numiter, mode, constraints, filter_pcorr, exponent, bgval
     )
-
-    im2 = transform_img(im1, res["transformation"], bgval, mode, invert=False)
-    # Order of mask should be always 1 - higher values produce strange results.
-    imask = transform_img(
-        torch.ones_like(im1), res["transformation"], 0, "nearest", invert=False
-    )
-    # This removes some weird artifacts
-    imask[imask > 0.8] = 1.0
-
-    # Framing here = just blending the im2 with its BG according to the mask
-    im3 = utils.frame_img(im2, imask, 10)
-
-    res["timg"] = im3
 
     return res
 
@@ -479,90 +474,6 @@ def _phase_correlation(
 
     ret -= torch.tensor(f0.shape) // 2
     return ret, success
-
-
-def transform_img(
-    img: torch.Tensor,
-    transformation: np.ndarray,
-    bgval: Optional[float] = None,
-    mode: str = "bilinear",
-    invert: bool = False,
-) -> torch.Tensor:
-    """
-    Return translation vector to register images.
-
-    Notes
-    -----
-    The transformation is to be understand on the coordinate axis of natural to an
-    image array. That is, the origin of coordinates is on the top left with the y axis
-    going down and the x axis to the right. Rotations go from x to y and therefore
-    a positive rotation angle will result in an anticlockwise rotation from the point
-    of view of the user when plotting the image but in fact its a clockwise rotation
-    from the point of view of the coordinate system.
-
-    Parameters
-    ----------
-    img
-        What will be transformed.
-        If a 3D array is passed, it is treated in a manner in which RGB
-        images are supposed to be handled - i.e. assume that coordinates
-        are (Y, X, channels).
-        Complex images are handled in a way that treats separately
-        the real and imaginary parts.
-    mode
-        `nearest` or `bilinear`. This are the modes supported by `grid_sample`
-    bgval
-        Shade of the background (filling during transformations)
-        If None is passed, :func:`imreg_dft.utils.get_borderval` with
-        radius of 5 is used to get it.
-
-    Returns
-    -------
-    The transformed image
-
-    """
-    if invert:
-        transformation = np.linalg.inv(transformation)
-
-    if bgval is None:
-        bgval = utils.get_borderval(img)
-
-    transformed_coords = utils.transform_2d_coord_arrays(
-        np.linalg.inv(transformation),
-        np.dstack(
-            np.meshgrid(np.arange(img.shape[1]), np.arange(img.shape[0]), indexing="xy")
-        ),
-    )
-    transformed_coords = torch.tensor(transformed_coords).type(torch.float32)
-    slave_transformed = utils.map_coordinates(
-        transformed_coords,
-        img,
-        cval=float(bgval),
-        mode=mode,
-    )
-
-    dest = slave_transformed
-
-    return dest
-
-
-def similarity_matrix(scale: float, angle: float, tvec: Iterable) -> np.ndarray:
-    # Rotation
-    angle = np.deg2rad(angle)
-    c, s = np.cos(angle), np.sin(angle)
-    r_matrix = np.identity(3)
-    r_matrix[:2, :2] = np.array([[c, -s], [s, c]])
-
-    # Scaling
-    s_matrix = np.identity(3)
-    s_matrix[0, 0] = scale
-    s_matrix[1, 1] = scale
-
-    # Translation
-    t_matrix = np.identity(3)
-    t_matrix[:2, 2] = tvec
-
-    return t_matrix @ r_matrix @ s_matrix
 
 
 def _get_log_base(shape: tuple[int, int], new_r: float) -> float:
