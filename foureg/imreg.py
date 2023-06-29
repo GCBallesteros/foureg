@@ -33,12 +33,15 @@
 """
 FFT based image registration. --- main functions
 """
+from copy import deepcopy
 from typing import Any, Iterable, Optional
 
 import numpy as np
 import torch
 
 import foureg.utils as utils
+
+from .constraints import Constraints
 
 EXCESS_CONST = 1.1
 PI = torch.pi
@@ -71,7 +74,7 @@ def _get_pcorr_shape(shape: tuple[int, int]) -> tuple[int, int]:
 def _get_ang_scale(
     ims: list[torch.Tensor],
     exponent: float = torch.inf,
-    constraints: Optional[dict[str, Any]] = None,
+    constraints: Constraints = Constraints(),
 ) -> tuple[float, float]:
     """
     Given two images, return their scale and angle difference.
@@ -132,9 +135,9 @@ def _get_ang_scale(
 def translation(
     im0: torch.Tensor,
     im1: torch.Tensor,
+    constraints: Constraints,
     filter_pcorr: int = 0,
     odds: float = 1,
-    constraints: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """
     Return translation vector to register images.
@@ -165,10 +168,10 @@ def translation(
     A dict that contains following keys: ``angle``, ``tvec`` (Y, X), and ``success``.
     """
     # We estimate translation for the original image...
-    tvec, succ = _translation(im0, im1, filter_pcorr, constraints)
+    tvec, succ = _translation(im0, im1, constraints, filter_pcorr)
     # ... and for the 180-degrees rotated image (the rotation estimation
     # doesn't distinguish rotation of x vs x + 180deg).
-    tvec2, succ2 = _translation(im0, utils.rot180(im1), filter_pcorr, constraints)
+    tvec2, succ2 = _translation(im0, utils.rot180(im1), constraints, filter_pcorr)
 
     pick_rotated = succ2 * odds > succ or odds == -1
     if pick_rotated:
@@ -207,7 +210,7 @@ def _similarity(
     im1: torch.Tensor,
     numiter: int = 1,
     mode: str = "bilinear",
-    constraints: Optional[dict[str, Any]] = None,
+    constraints: Constraints = Constraints(),
     filter_pcorr: int = 0,
     exponent: float = torch.inf,
     bgval: Optional[float] = None,
@@ -243,28 +246,22 @@ def _similarity(
     angle = 0.0
     im2 = im1
 
-    constraints_default = dict(angle=[0, None], scale=[1, None])
-    if constraints is None:
-        constraints = constraints_default
-
-    # We guard against case when caller passes only one constraint key.
-    # Now, the provided ones just replace defaults.
-    constraints_default.update(constraints)
-    constraints = constraints_default
-
-    # During iterations, we have to work with constraints too.
-    # So we make the copy in order to leave the original intact
-    constraints_dynamic = constraints.copy()
-    constraints_dynamic["scale"] = list(constraints["scale"])
-    constraints_dynamic["angle"] = list(constraints["angle"])
+    # get a copy of the constraints so that we can modify them during the iterations
+    constraints_dynamic = deepcopy(constraints)
 
     for _ in range(numiter):
         newscale, newangle = _get_ang_scale([im0, im2], exponent, constraints_dynamic)
         scale *= newscale
         angle += newangle
 
-        constraints_dynamic["scale"][0] /= newscale
-        constraints_dynamic["angle"][0] -= newangle
+        constraints_dynamic.scale = (
+            constraints_dynamic.scale[0] / newscale,
+            constraints_dynamic.scale[1],
+        )
+        constraints_dynamic.scale = (
+            constraints_dynamic.angle[0] - newangle,
+            constraints_dynamic.angle[1],
+        )
 
         # transform_img understand the angle the other way around hence the minus
         # sign below
@@ -274,11 +271,11 @@ def _similarity(
         im2 = transform_img(im1, transformation, bgval=bgval, mode=mode, invert=False)
 
     # Here we look how is the turn-180
-    target, stdev = constraints.get("angle", (0, None))
+    target, stdev = constraints.angle
     odds = _get_odds(angle, target, stdev)
 
     # now we can use pcorr to guess the translation
-    res = translation(im0, im2, filter_pcorr, odds, constraints)
+    res = translation(im0, im2, constraints, filter_pcorr, odds)
 
     # Flipping tvec is required because transform_img has a different
     # understanding of what is xy wrt the output of translation
@@ -306,7 +303,7 @@ def similarity(
     im1: torch.Tensor,
     numiter: int = 1,
     mode: str = "bilinear",
-    constraints: Optional[dict[str, Any]] = None,
+    constraints: Constraints = Constraints(),
     filter_pcorr: int = 0,
     exponent: float = torch.inf,
 ) -> dict[str, Any]:
@@ -379,6 +376,7 @@ def similarity(
     im3 = utils.frame_img(im2, imask, 10)
 
     res["timg"] = im3
+
     return res
 
 
@@ -426,8 +424,8 @@ def _get_odds(angle: float, target: float, stdev: float) -> float:
 def _translation(
     im0: torch.Tensor,
     im1: torch.Tensor,
+    constraints: Constraints,
     filter_pcorr: int = 0,
-    constraints: Optional[dict[str, Any]] = None,
 ) -> tuple[torch.Tensor, Any]:
     """
     The plain wrapper for translation phase correlation, no big deal.

@@ -30,7 +30,7 @@
 """
 FFT based image registration. --- utility functions
 """
-from math import ceil
+import math
 from typing import Optional
 
 import numpy as np
@@ -39,6 +39,8 @@ import scipy.ndimage as ndi
 import torch
 import torch.nn.functional as F
 from torch.distributions import Normal
+
+from .constraints import Constraints
 
 
 def wrap_angle(angles, ceil=2 * np.pi):
@@ -90,60 +92,56 @@ def _get_lograd(shape: tuple[int, int], log_base: float) -> torch.Tensor:
     return ret
 
 
-def _get_constraint_mask(shape, log_base, constraints=None):
+def _get_constraint_mask(shape, log_base, constraints: Constraints):
     """
     Prepare mask to apply to constraints to a cross-power spectrum.
     """
-    if constraints is None:
-        constraints = {}
-
-    mask = np.ones(shape, float)
+    mask = torch.ones(shape, dtype=torch.float32)
 
     # Here, we create masks that modulate picking the best correspondence.
     # Generally, we look at the log-polar array and identify mapping of
     # coordinates to values of quantities.
-    if "scale" in constraints:
-        scale, sigma = constraints["scale"]
-        scales = fft.ifftshift(_get_lograd(shape, log_base))
+
+    ## Apply SCALE constraints
+    scale, sigma = constraints.scale
+    if not math.isnan(sigma):
+        scales = torch.fft.ifftshift(_get_lograd(shape, log_base))
         # vvv This issome kind of transformation of result of _get_lograd
         # vvv (log radius in pixels) to the linear scale.
         scales *= log_base ** (-shape[1] / 2.0)
         # This makes the scales array low near where scales is near 'scale'
         scales -= 1.0 / scale
+
         if sigma == 0:
             # there isn't: ascales = np.abs(scales - scale)
             # because scales are already low for values near 'scale'
-            ascales = np.abs(scales)
+            ascales = torch.abs(scales)
             scale_min = ascales.min()
             mask[ascales > scale_min] = 0
-        elif sigma is None:
-            pass
         else:
-            mask *= np.exp(-(scales**2) / sigma**2)
+            mask *= torch.exp(-(scales**2) / sigma**2)
 
-    if "angle" in constraints:
-        angle, sigma = constraints["angle"]
+    ## Apply ANGLE constraints
+    angle, sigma = constraints.angle
+    if not math.isnan(sigma):
         angles = _get_angles(shape)
         # We flip the sign on purpose
         # TODO: ^^^ Why???
-        angles += np.deg2rad(angle)
+        angles -= np.deg2rad(angle)
         # TODO: Check out the wrapping. It may be tricky since pi+1 != 1
-        wrap_angle(angles, np.pi)
-        angles = np.rad2deg(angles)
+        angles = wrap_angle(angles, torch.pi)
+        angles = torch.rad2deg(angles)
         if sigma == 0:
-            aangles = np.abs(angles)
+            aangles = torch.abs(angles)
             angle_min = aangles.min()
             mask[aangles > angle_min] = 0
-        elif sigma is None:
-            pass
         else:
-            mask *= np.exp(-(angles**2) / sigma**2)
+            mask *= torch.exp(-(angles**2) / sigma**2)
 
-    mask = fft.fftshift(mask)
-    return mask
+    return torch.fft.fftshift(mask)
 
 
-def argmax_angscale(array, log_base, exponent, constraints=None):
+def argmax_angscale(array, log_base, exponent, constraints):
     """
     Given a power spectrum, we choose the best fit.
 
@@ -172,10 +170,7 @@ def min_filter_torch(arr, kernel_size):
     return output
 
 
-def argmax_translation(array, filter_pcorr, constraints=None):
-    if constraints is None:
-        constraints = dict(tx=(0, None), ty=(0, None))
-
+def argmax_translation(array, filter_pcorr, constraints: Constraints):
     # We want to keep the original and here is obvious that
     # it won't get changed inadvertently
     array_orig = array.clone()
@@ -186,10 +181,10 @@ def argmax_translation(array, filter_pcorr, constraints=None):
     mask = torch.ones(array.shape, dtype=torch.float32)
     # first goes Y, then X
     # TODO UNTESTED CODE PATH - It requires passing constrints for tx and ty
-    for dim, key in enumerate(("ty", "tx")):
-        if constraints.get(key, (0, None))[1] is None:
+    for dim, key in enumerate(["ty", "tx"]):
+        if math.isnan(constraints.__getattribute__(key)[1]):
             continue
-        pos, sigma = constraints[key]
+        pos, sigma = constraints.__getattribute__(key)
         alen = ashape[dim]
         dom = np.linspace(-alen // 2, -alen // 2 + alen, alen, False)
         if sigma == 0:
@@ -199,6 +194,7 @@ def argmax_translation(array, filter_pcorr, constraints=None):
             vals[idx] = 1.0
         else:
             vals = np.exp(-((dom - pos) ** 2) / sigma**2)
+
         if dim == 0:
             mask *= vals[:, np.newaxis]
         else:
@@ -316,28 +312,26 @@ def _interpolate(array, rough, rad=2):
     return ret
 
 
-def _argmax_ext(array, exponent):
+def _argmax_ext(array: torch.Tensor, exponent: float) -> torch.Tensor:
     """
     Calculate coordinates of the COM (center of mass) of the provided array.
 
     Parameters
     ----------
-    array (ndarray)
+    array
         The array to be examined.
-    exponent (float or 'inf')
+    exponent
         The exponent we power the array with. If the value 'inf' is given,
          the coordinage of the array maximum is taken.
 
     Returns
     -------
-    np.ndarray
     The COM coordinate tuple, float values are allowed!
     """
 
     # When using an integer exponent for _argmax_ext, it is good to have the
     # neutral rotation/scale in the center rather near the edges
 
-    ret = None
     if exponent == torch.inf:
         ret = _argmax2D(array)
     else:
@@ -499,7 +493,7 @@ def get_apofield(shape, aporad: int):
 
 
 def gaussian_kernel_1d(sigma: float, num_sigma: float = 3.0) -> torch.Tensor:
-    radius = ceil(sigma * num_sigma)
+    radius = math.ceil(sigma * num_sigma)
     support = torch.arange(-radius, radius + 1, dtype=torch.float32)
     kernel = Normal(loc=0, scale=sigma).log_prob(support).exp_()
 
