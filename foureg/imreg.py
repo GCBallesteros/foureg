@@ -228,7 +228,8 @@ def _similarity(
 
     Returns
     -------
-    Dictionary with results.
+    Similarity transformation and associated uncertainties
+    .
     """
     im1 = torch.Tensor(im1).type(torch.float32)
     im0 = torch.Tensor(im0).type(torch.float32)
@@ -259,8 +260,8 @@ def _similarity(
             constraints_dynamic.scale[0] / newscale,
             constraints_dynamic.scale[1],
         )
-        constraints_dynamic.scale = (
-            constraints_dynamic.angle[0] - newangle,
+        constraints_dynamic.angle = (
+            constraints_dynamic.angle[0] + newangle,
             constraints_dynamic.angle[1],
         )
 
