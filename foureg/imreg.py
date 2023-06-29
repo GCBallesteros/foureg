@@ -206,7 +206,7 @@ def _get_precision(shape: tuple[int, int], scale: float = 1) -> tuple[float, flo
     return Dangle, Dscale
 
 
-def _similarity(
+def similarity(
     im0: torch.Tensor,
     im1: torch.Tensor,
     numiter: int = 1,
@@ -214,10 +214,11 @@ def _similarity(
     constraints: Constraints = Constraints(),
     filter_pcorr: int = 0,
     exponent: float = torch.inf,
-    bgval: Optional[float] = None,
 ) -> Result:
     """
-    This function takes some input and returns mutual rotation, scale and translation.
+    Return similarity transformed image im1 and transformation parameters.
+    Transformation parameters are: isotropic scale factor, rotation angle (in
+    degrees), and translation vector.
 
     It does these things during the process:
     * Handles correct constraints handling (defaults etc.).
@@ -226,13 +227,55 @@ def _similarity(
     * Performs translation determination.
     * Calculates precision.
 
+    A similarity transformation is an affine transformation with isotropic scale and
+    without shear.
+
+    Parameters
+    ----------
+    im0
+        The first (template) image
+    im1
+        The second (subject) image
+    numiter
+        How many times to iterate when determining scale and rotation
+    mode
+        Interpolation mode passed to grid_sample
+    filter_pcorr
+        Radius of a spectrum filter for translation detection
+    exponent
+        The exponent value used during processing. Refer to the docs for a thorough
+        explanation. Generally, pass "inf" when feeling conservative. Otherwise,
+        experiment, values below 5 are not even supposed to work.
+    constraint
+        Specify preference of seeked values.
+        Pass None (default) for no constraints, otherwise pass a dict with
+        keys ``angle``, ``scale``, ``tx`` and/or ``ty`` (i.e. you can pass
+        all, some of them or none of them, all is fine). The value of a key
+        is supposed to be a mutable 2-tuple (e.g. a list), where the first
+        value is related to the constraint center and the second one to
+        softness of the constraint (the higher is the number,
+        the more soft a constraint is).
+
+        More specifically, constraints may be regarded as weights in form of a shifted
+        Gaussian curve. However, for precise meaning of keys and values, see the
+        documentation section `constraints`. Names of dictionary keys map to
+        names of command-line arguments.
+
     Returns
     -------
     Similarity transformation and associated uncertainties
-    .
+
+    Note
+    ----
+    There are limitations
+
+    * Scale change must be less than 2.
+    * No subpixel precision (but you can use *resampling* to get around this).
     """
     im1 = torch.Tensor(im1).type(torch.float32)
     im0 = torch.Tensor(im0).type(torch.float32)
+
+    bgval = utils.get_borderval(im1, 5)
     # ims_torch = [torch.Tensor(img.copy()).type(torch.float32) for img in ims]
     if bgval is None:
         bgval = utils.get_borderval(im1, 5)
@@ -302,75 +345,6 @@ def _similarity(
         dscale=Dscale,
         dangle=Dangle,
         dt=0.25,
-    )
-
-    return res
-
-
-def similarity(
-    im0: torch.Tensor,
-    im1: torch.Tensor,
-    numiter: int = 1,
-    mode: str = "bilinear",
-    constraints: Constraints = Constraints(),
-    filter_pcorr: int = 0,
-    exponent: float = torch.inf,
-) -> Result:
-    """
-    Return similarity transformed image im1 and transformation parameters.
-    Transformation parameters are: isotropic scale factor, rotation angle (in
-    degrees), and translation vector.
-
-    A similarity transformation is an affine transformation with isotropic scale and
-    without shear.
-
-    Parameters
-    ----------
-    im0
-        The first (template) image
-    im1
-        The second (subject) image
-    numiter
-        How many times to iterate when determining scale and rotation
-    mode
-        Interpolation mode passed to grid_sample
-    filter_pcorr
-        Radius of a spectrum filter for translation detection
-    exponent
-        The exponent value used during processing. Refer to the docs for a thorough
-        explanation. Generally, pass "inf" when feeling conservative. Otherwise,
-        experiment, values below 5 are not even supposed to work.
-    constraint
-        Specify preference of seeked values.
-        Pass None (default) for no constraints, otherwise pass a dict with
-        keys ``angle``, ``scale``, ``tx`` and/or ``ty`` (i.e. you can pass
-        all, some of them or none of them, all is fine). The value of a key
-        is supposed to be a mutable 2-tuple (e.g. a list), where the first
-        value is related to the constraint center and the second one to
-        softness of the constraint (the higher is the number,
-        the more soft a constraint is).
-
-        More specifically, constraints may be regarded as weights in form of a shifted
-        Gaussian curve. However, for precise meaning of keys and values, see the
-        documentation section `constraints`. Names of dictionary keys map to
-        names of command-line arguments.
-
-    Returns
-    -------
-    A dictionary that contains following keys: ``scale``, ``angle``, ``tvec`` (Y, X),
-    ``success`` and ``timg`` (the transformed subject image)
-
-    Note
-    ----
-    There are limitations
-
-    * Scale change must be less than 2.
-    * No subpixel precision (but you can use *resampling* to get around this).
-    """
-    bgval = utils.get_borderval(im1, 5)
-
-    res = _similarity(
-        im0, im1, numiter, mode, constraints, filter_pcorr, exponent, bgval
     )
 
     return res
