@@ -96,7 +96,7 @@ def _get_ang_scale(
     assert len(ims) == 2, "Only two images are supported as input"
     shape = ims[0].shape
 
-    ims_apod = [utils._apodize(im) for im in ims]
+    ims_apod = [utils.apodize(im) for im in ims]
     dfts = [torch.fft.fftshift(torch.fft.fft2(im)) for im in ims_apod]
     filt = _logpolar_filter(shape)
     dfts = [dft * filt for dft in dfts]
@@ -401,7 +401,6 @@ def _translation(
     The plain wrapper for translation phase correlation, no big deal.
     """
     # Apodization and pcorr don't play along
-    # im0, im1 = [utils._apodize(im, ratio=1) for im in (im0, im1)]
     ret, succ = _phase_correlation(
         im0, im1, utils.argmax_translation, filter_pcorr, constraints
     )

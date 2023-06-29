@@ -433,7 +433,7 @@ def _xpass(shape, lo, hi):
     return res
 
 
-def _apodize(
+def apodize(
     what: torch.Tensor, aporad: Optional[int] = None, ratio: Optional[float] = None
 ):
     """
@@ -451,7 +451,8 @@ def _apodize(
             When a float number, the background will be the image itself
             convolved with Gaussian kernel of sigma (aporad / ratio).
 
-    Returns:
+    Returns
+    -------
         The apodized image
     """
 
@@ -460,13 +461,9 @@ def _apodize(
         aporad = int(mindim * 0.12)
     apofield = get_apofield(what.shape, aporad)
     res = what * apofield
-    if ratio is not None:
-        # TODO: UNTESTED BRANCH
-        ratio = float(ratio)
-        bg = ndi.gaussian_filter(what, aporad / ratio, mode="wrap")
-    else:
-        bg = get_borderval(what, aporad // 2)
+    bg = get_borderval(what, aporad // 2)
     res += bg * (1 - apofield)
+
     return res
 
 
