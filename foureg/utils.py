@@ -433,35 +433,26 @@ def _xpass(shape, lo, hi):
     return res
 
 
-def apodize(
-    what: torch.Tensor, aporad: Optional[int] = None, ratio: Optional[float] = None
-):
+def apodize(img: torch.Tensor) -> torch.Tensor:
     """
     Given an image, it apodizes it (so it becomes quasi-seamless).
-    When ``ratio`` is None, color near the edges will converge
-    to the same colour, whereas when ratio is a float number, a blurred
-    original image will serve as background.
+    Color near the edges will converge to the same color
 
-    Args:
-        what: The original image
-        aporad (int): Radius [px], width of the band near the edges
-            that will get modified
-        ratio (float or None): When None, the apodization background will
-            be a flat color.
-            When a float number, the background will be the image itself
-            convolved with Gaussian kernel of sigma (aporad / ratio).
+    Parameters
+    ----------
+    img
+        Input img
 
     Returns
     -------
         The apodized image
     """
 
-    if aporad is None:
-        mindim = min(what.shape)
-        aporad = int(mindim * 0.12)
-    apofield = get_apofield(what.shape, aporad)
-    res = what * apofield
-    bg = get_borderval(what, aporad // 2)
+    mindim = min(img.shape)
+    aporad = int(mindim * 0.12)
+    apofield = get_apofield(img.shape, aporad)
+    res = img * apofield
+    bg = get_borderval(img, aporad // 2)
     res += bg * (1 - apofield)
 
     return res
