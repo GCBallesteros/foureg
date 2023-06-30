@@ -161,7 +161,7 @@ def argmax_angscale(
     return ret_final, success.item()
 
 
-def min_filter_torch(arr, kernel_size):
+def min_filter_torch(arr: torch.Tensor, kernel_size: int) -> torch.Tensor:
     arr = arr.unsqueeze(0).unsqueeze(0)
     pad = kernel_size // 2
     output = -F.max_pool2d(

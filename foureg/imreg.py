@@ -34,7 +34,7 @@
 FFT based image registration. --- main functions
 """
 from copy import deepcopy
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 import torch
@@ -109,10 +109,7 @@ def _get_ang_scale(
     (arg_ang, arg_rad), _ = _phase_correlation(
         stuffs[0],
         stuffs[1],
-        utils.argmax_angscale,
-        log_base,
-        exponent,
-        constraints,
+        lambda img: utils.argmax_angscale(img, log_base, exponent, constraints),
     )
 
     angle = -np.pi * arg_ang / float(pcorr_shape[0])
@@ -400,13 +397,17 @@ def _translation(
     """
     # Apodization and pcorr don't play along
     ret, succ = _phase_correlation(
-        im0, im1, utils.argmax_translation, filter_pcorr, constraints
+        im0,
+        im1,
+        lambda img: utils.argmax_translation(img, filter_pcorr, constraints),
     )
     return ret, succ
 
 
 def _phase_correlation(
-    im0: torch.Tensor, im1: torch.Tensor, callback: Optional[Any] = None, *args
+    im0: torch.Tensor,
+    im1: torch.Tensor,
+    callback: Callable[[torch.Tensor], Any],
 ) -> tuple[torch.Tensor, Any]:
     """
     Computes phase correlation between im0 and im1
@@ -425,9 +426,6 @@ def _phase_correlation(
     tuple: The translation vector (Y, X). Translation vector of (0, 0)
     means that the two images match.
     """
-    if callback is None:
-        callback = utils._argmax2D
-
     # TODO: Implement some form of high-pass filtering of PHASE correlation
     f0, f1 = [torch.fft.fft2(arr) for arr in (im0, im1)]
     # spectrum can be filtered (already),
@@ -438,7 +436,7 @@ def _phase_correlation(
     # scps = shifted cps
     scps = torch.fft.fftshift(cps)
 
-    (t0, t1), success = callback(scps, *args)
+    (t0, t1), success = callback(scps)
     ret = torch.tensor((t0, t1))
 
     t0 -= f0.shape[0] // 2
