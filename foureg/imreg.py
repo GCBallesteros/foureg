@@ -89,9 +89,7 @@ def _get_ang_scale(
 
     Returns
     -------
-    tuple: Scale, angle.
-
-    Describes the relationship of the subject image to the first one.
+    Scale and angle tuple
     """
     assert len(ims) == 2, "Only two images are supported as input"
     shape = ims[0].shape
