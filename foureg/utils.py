@@ -35,7 +35,6 @@ from typing import Iterable, Optional
 
 import numpy as np
 import numpy.fft as fft
-import scipy.ndimage as ndi
 import torch
 import torch.nn.functional as F
 from torch.distributions import Normal
