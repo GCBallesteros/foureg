@@ -83,13 +83,13 @@ def test_subpixel():
     anarr = np.zeros((4, 5))
     anarr[2, 3] = 1
     # The correspondence principle should hold
-    first_guess = (2, 3)
-    second_guess = utils._interpolate(anarr, first_guess, rad=1)
+    first_guess = torch.as_tensor((2, 3))
+    second_guess = utils._interpolate(torch.as_tensor(anarr), first_guess, rad=1)
     assert np.allclose(second_guess, (2, 3))
 
     # Now something more meaningful
     anarr[2, 4] = 1
-    second_guess = utils._interpolate(anarr, first_guess, rad=1)
+    second_guess = utils._interpolate(torch.as_tensor(anarr), first_guess, rad=1)
     assert np.allclose(second_guess, (2, 3.5))
 
 

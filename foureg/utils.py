@@ -292,7 +292,7 @@ def _get_subarr(array, center, rad):
     return subarray
 
 
-def _interpolate(array, rough, rad=2):
+def _interpolate(array: torch.Tensor, rough, rad: int = 2):
     """
     Returns index that is in the array after being rounded.
 
