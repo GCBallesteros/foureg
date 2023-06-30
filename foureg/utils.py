@@ -169,7 +169,9 @@ def min_filter_torch(arr, kernel_size):
     return output
 
 
-def argmax_translation(array, filter_pcorr, constraints: Constraints):
+def argmax_translation(
+    array: torch.Tensor, filter_pcorr: int, constraints: Constraints
+):
     # We want to keep the original and here is obvious that
     # it won't get changed inadvertently
     array_orig = array.clone()
@@ -179,20 +181,19 @@ def argmax_translation(array, filter_pcorr, constraints: Constraints):
     ashape = array.shape
     mask = torch.ones(array.shape, dtype=torch.float32)
     # first goes Y, then X
-    # TODO UNTESTED CODE PATH - It requires passing constrints for tx and ty
     for dim, key in enumerate(["ty", "tx"]):
         if math.isnan(constraints.__getattribute__(key)[1]):
             continue
         pos, sigma = constraints.__getattribute__(key)
         alen = ashape[dim]
-        dom = np.linspace(-alen // 2, -alen // 2 + alen, alen, False)
+        dom = torch.as_tensor(np.linspace(-alen // 2, -alen // 2 + alen, alen, False))
         if sigma == 0:
             # generate a binary array closest to the position
-            idx = np.argmin(np.abs(dom - pos))
-            vals = np.zeros(dom.size)
+            idx = torch.argmin(torch.abs(dom - pos))
+            vals = torch.zeros_like(dom)
             vals[idx] = 1.0
         else:
-            vals = np.exp(-((dom - pos) ** 2) / sigma**2)
+            vals = torch.exp(-((dom - pos) ** 2) / sigma**2)
 
         if dim == 0:
             mask *= vals[:, np.newaxis]

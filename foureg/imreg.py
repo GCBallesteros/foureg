@@ -149,7 +149,7 @@ def translation(
         The first (template) image
     im1
         The second (subject) image
-    filter_pcorr:
+    filter_pcorr
         Radius of the minimum spectrum filter for translation detection, use the
         filter when detection fails. Values > 3 are likely not useful.
     constraints
