@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 
 import foureg.utils as utils
 
@@ -33,21 +34,21 @@ def _arrdiff(a, b):
 
 
 def test_subarray():
-    arr = np.arange(20)
+    arr = torch.arange(20)
     arr = arr.reshape((4, 5))
 
     # trivial subarray
-    suba = utils._get_subarr(arr, (1, 1), 1)
+    suba = utils._get_subarr(arr, (1, 1), 1).cpu().numpy()
     ret = arr[:3, :3]
-    assert np.allclose(suba, ret)
+    assert np.allclose(suba, ret.numpy())
 
     # subarray with zero radius
-    suba = utils._get_subarr(arr, (1, 1), 0)
+    suba = utils._get_subarr(arr, (1, 1), 0).cpu().numpy()
     ret = arr[1, 1]
-    assert np.allclose(suba, ret)
+    assert np.allclose(suba, ret.numpy())
 
     # subarray that wraps through two edges
-    suba = utils._get_subarr(arr, (0, 0), 1)
+    suba = utils._get_subarr(arr, (0, 0), 1).cpu().numpy()
     ret = np.zeros((3, 3), int)
     ret[1:, 1:] = arr[:2, :2]
     ret[0, 0] = arr[-1, -1]
