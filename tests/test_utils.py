@@ -97,13 +97,13 @@ def test_subpixel_edge():
     anarr = np.zeros((4, 5))
     anarr[3, 0] = 1
     anarr[3, 4] = 1
-    first_guess = (4, 0)
-    second_guess = utils._interpolate(anarr, first_guess, rad=2)
+    first_guess = torch.tensor((4, 0))
+    second_guess = utils._interpolate(torch.as_tensor(anarr), first_guess, rad=2)
     assert np.allclose(second_guess, (3, -0.5))
 
     anarr[3, 0] += 1
     anarr[0, 4] = 1
-    second_guess = utils._interpolate(anarr, first_guess, rad=2)
+    second_guess = utils._interpolate(torch.as_tensor(anarr), first_guess, rad=2)
     assert np.allclose(second_guess, (3.25, -0.5))
 
 
