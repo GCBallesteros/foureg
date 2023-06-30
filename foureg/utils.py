@@ -140,7 +140,9 @@ def _get_constraint_mask(shape, log_base, constraints: Constraints):
     return torch.fft.fftshift(mask)
 
 
-def argmax_angscale(array, log_base, exponent, constraints):
+def argmax_angscale(
+    array: torch.Tensor, log_base, exponent: float, constraints: Constraints
+) -> tuple[torch.Tensor, float]:
     """
     Given a power spectrum, we choose the best fit.
 
@@ -156,7 +158,7 @@ def argmax_angscale(array, log_base, exponent, constraints):
 
     success = _get_success(array_orig, tuple(ret_final), 0)
 
-    return ret_final, success
+    return ret_final, success.item()
 
 
 def min_filter_torch(arr, kernel_size):
