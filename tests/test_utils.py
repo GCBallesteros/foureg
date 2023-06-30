@@ -70,8 +70,8 @@ def test_filter():
 
 
 def test_Argmax_ext():
-    src = np.array([[1, 3, 1], [0, 0, 0], [1, 3.01, 0]])
-    infres = utils._argmax_ext(src, "inf")  # element 3.01
+    src = torch.as_tensor(np.array([[1, 3, 1], [0, 0, 0], [1, 3.01, 0]]))
+    infres = utils._argmax_ext(src, float("inf"))  # element 3.01
     assert tuple(infres) == (2.0, 1.0)
 
     n10res = utils._argmax_ext(src, 10)  # element 1 in the rows with 3s
