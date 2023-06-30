@@ -27,7 +27,6 @@ classifiers = [
 [tool.poetry.dependencies]
 python = ">=3.8,<3.12"
 numpy = "^1.21"
-scipy = "^1.7"
 torch = "^2.0.1"
 
 [tool.poetry.group.dev.dependencies]
