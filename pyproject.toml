@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "foureg"
-version = "0.1.0"
+version = "1.0.0"
 description = "Fourier transform based image registration"
 authors = ["Guillem Ballesteros <guillem@maxwellrules.com>"]
 readme = "README.md"
