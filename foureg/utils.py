@@ -30,10 +30,16 @@
 """
 FFT based image registration. --- utility functions
 """
+import math
+from typing import Iterable, Optional
 
 import numpy as np
 import numpy.fft as fft
-import scipy.ndimage as ndi
+import torch
+import torch.nn.functional as F
+from torch.distributions import Normal
+
+from .constraints import Constraints
 
 
 def wrap_angle(angles, ceil=2 * np.pi):
@@ -50,26 +56,26 @@ def wrap_angle(angles, ceil=2 * np.pi):
     return angles
 
 
-def rot180(arr):
+def rot180(arr: torch.Tensor) -> torch.Tensor:
     """
     Rotate the input array over 180°
     """
-    ret = np.rot90(arr, 2)
+    ret = torch.rot90(arr, 2)
     return ret
 
 
-def _get_angles(shape):
+def _get_angles(shape: tuple[int, int]) -> torch.Tensor:
     """
     In the log-polar spectrum, the (first) coord corresponds to an angle.
     This function returns a mapping of (the two) coordinates
     to the respective angle.
     """
-    ret = np.zeros(shape, dtype=np.float64)
-    ret -= np.linspace(0, np.pi, shape[0], endpoint=False)[:, np.newaxis]
+    ret = torch.zeros(shape, dtype=torch.float32)
+    ret -= torch.linspace(0, torch.pi, shape[0])[:, None]
     return ret
 
 
-def _get_lograd(shape, log_base):
+def _get_lograd(shape: tuple[int, int], log_base: float) -> torch.Tensor:
     """
     In the log-polar spectrum, the (second) coord corresponds to an angle.
     This function returns a mapping of (the two) coordinates
@@ -80,65 +86,63 @@ def _get_lograd(shape, log_base):
     2D np.ndarray of shape ``shape``, -1 coord contains scales
     from 0 to log_base ** (shape[1] - 1)
     """
-    ret = np.zeros(shape, dtype=np.float64)
-    ret += np.power(log_base, np.arange(shape[1], dtype=float))[np.newaxis, :]
+    ret = torch.zeros(shape, dtype=torch.float32)
+    ret += torch.pow(log_base, torch.arange(shape[1], dtype=torch.float32))[None, :]
     return ret
 
 
-def _get_constraint_mask(shape, log_base, constraints=None):
+def _get_constraint_mask(shape, log_base, constraints: Constraints):
     """
     Prepare mask to apply to constraints to a cross-power spectrum.
     """
-    if constraints is None:
-        constraints = {}
-
-    mask = np.ones(shape, float)
+    mask = torch.ones(shape, dtype=torch.float32)
 
     # Here, we create masks that modulate picking the best correspondence.
     # Generally, we look at the log-polar array and identify mapping of
     # coordinates to values of quantities.
-    if "scale" in constraints:
-        scale, sigma = constraints["scale"]
-        scales = fft.ifftshift(_get_lograd(shape, log_base))
+
+    ## Apply SCALE constraints
+    scale, sigma = constraints.scale
+    if not math.isnan(sigma):
+        scales = torch.fft.ifftshift(_get_lograd(shape, log_base))
         # vvv This issome kind of transformation of result of _get_lograd
         # vvv (log radius in pixels) to the linear scale.
         scales *= log_base ** (-shape[1] / 2.0)
         # This makes the scales array low near where scales is near 'scale'
         scales -= 1.0 / scale
+
         if sigma == 0:
             # there isn't: ascales = np.abs(scales - scale)
             # because scales are already low for values near 'scale'
-            ascales = np.abs(scales)
+            ascales = torch.abs(scales)
             scale_min = ascales.min()
             mask[ascales > scale_min] = 0
-        elif sigma is None:
-            pass
         else:
-            mask *= np.exp(-(scales**2) / sigma**2)
+            mask *= torch.exp(-(scales**2) / sigma**2)
 
-    if "angle" in constraints:
-        angle, sigma = constraints["angle"]
+    ## Apply ANGLE constraints
+    angle, sigma = constraints.angle
+    if not math.isnan(sigma):
         angles = _get_angles(shape)
         # We flip the sign on purpose
         # TODO: ^^^ Why???
-        angles += np.deg2rad(angle)
+        angles -= np.deg2rad(angle)
         # TODO: Check out the wrapping. It may be tricky since pi+1 != 1
-        wrap_angle(angles, np.pi)
-        angles = np.rad2deg(angles)
+        angles = wrap_angle(angles, torch.pi)
+        angles = torch.rad2deg(angles)
         if sigma == 0:
-            aangles = np.abs(angles)
+            aangles = torch.abs(angles)
             angle_min = aangles.min()
             mask[aangles > angle_min] = 0
-        elif sigma is None:
-            pass
         else:
-            mask *= np.exp(-(angles**2) / sigma**2)
+            mask *= torch.exp(-(angles**2) / sigma**2)
 
-    mask = fft.fftshift(mask)
-    return mask
+    return torch.fft.fftshift(mask)
 
 
-def argmax_angscale(array, log_base, exponent, constraints=None):
+def argmax_angscale(
+    array: torch.Tensor, log_base, exponent: float, constraints: Constraints
+) -> tuple[torch.Tensor, float]:
     """
     Given a power spectrum, we choose the best fit.
 
@@ -146,7 +150,7 @@ def argmax_angscale(array, log_base, exponent, constraints=None):
     passed to `_argmax_ext`.
     """
     mask = _get_constraint_mask(array.shape, log_base, constraints)
-    array_orig = array.copy()
+    array_orig = array.clone()
 
     array *= mask
     ret = _argmax_ext(array, exponent)
@@ -154,35 +158,45 @@ def argmax_angscale(array, log_base, exponent, constraints=None):
 
     success = _get_success(array_orig, tuple(ret_final), 0)
 
-    return ret_final, success
+    return ret_final, success.item()
 
 
-def argmax_translation(array, filter_pcorr, constraints=None):
-    if constraints is None:
-        constraints = dict(tx=(0, None), ty=(0, None))
+def min_filter_torch(arr: torch.Tensor, kernel_size: int) -> torch.Tensor:
+    arr = arr.unsqueeze(0).unsqueeze(0)
+    pad = kernel_size // 2
+    output = -F.max_pool2d(
+        F.pad(-arr, (pad, pad, pad, pad), value=-torch.inf), kernel_size, stride=1
+    ).squeeze()
 
+    return output
+
+
+def argmax_translation(
+    array: torch.Tensor, filter_pcorr: int, constraints: Constraints
+):
     # We want to keep the original and here is obvious that
     # it won't get changed inadvertently
-    array_orig = array.copy()
+    array_orig = array.clone()
     if filter_pcorr > 0:
-        array = ndi.minimum_filter(array, filter_pcorr)
+        array = min_filter_torch(array, filter_pcorr)
 
-    ashape = np.array(array.shape, int)
-    mask = np.ones(ashape, float)
+    ashape = array.shape
+    mask = torch.ones(array.shape, dtype=torch.float32)
     # first goes Y, then X
-    for dim, key in enumerate(("ty", "tx")):
-        if constraints.get(key, (0, None))[1] is None:
+    for dim, key in enumerate(["ty", "tx"]):
+        if math.isnan(constraints.__getattribute__(key)[1]):
             continue
-        pos, sigma = constraints[key]
+        pos, sigma = constraints.__getattribute__(key)
         alen = ashape[dim]
-        dom = np.linspace(-alen // 2, -alen // 2 + alen, alen, False)
+        dom = torch.as_tensor(np.linspace(-alen // 2, -alen // 2 + alen, alen, False))
         if sigma == 0:
             # generate a binary array closest to the position
-            idx = np.argmin(np.abs(dom - pos))
-            vals = np.zeros(dom.size)
+            idx = torch.argmin(torch.abs(dom - pos))
+            vals = torch.zeros_like(dom)
             vals[idx] = 1.0
         else:
-            vals = np.exp(-((dom - pos) ** 2) / sigma**2)
+            vals = torch.exp(-((dom - pos) ** 2) / sigma**2)
+
         if dim == 0:
             mask *= vals[:, np.newaxis]
         else:
@@ -192,11 +206,11 @@ def argmax_translation(array, filter_pcorr, constraints=None):
 
     # WE ARE FFTSHIFTED already.
     # ban translations that are too big
-    aporad = (ashape // 6).min()
+    aporad = min(ashape[0] // 6, ashape[1] // 6)
     mask2 = get_apofield(ashape, aporad)
     array *= mask2
     # Find what we look for
-    tvec = _argmax_ext(array, "inf")
+    tvec = _argmax_ext(array, torch.inf)
     tvec = _interpolate(array_orig, tvec)
 
     # If we use constraints or min filter,
@@ -208,17 +222,21 @@ def argmax_translation(array, filter_pcorr, constraints=None):
 
 def _get_success(array, coord, radius=2):
     """
-    Given a coord, examine the array around it and return a number signifying
-    how good is the "match".
+    Given a coord, examine the array around it and return a number signifying how good
+    is the "match".
 
-    Args:
-        radius: Get the success as a sum of neighbor of coord of this radius
-        coord: Coordinates of the maximum. Float numbers are allowed
-            (and converted to int inside)
+    Parameters
+    ----------
+    radius
+        Get the success as a sum of neighbor of coord of this radius
+    coord
+        Coordinates of the maximum. Float numbers are allowed (and converted to int
+        inside)
 
-    Returns:
-        Success as float between 0 and 1 (can get slightly higher than 1).
-        The meaning of the number is loose, but the higher the better.
+    Returns
+    -------
+    Success as float between 0 and 1 (can get slightly higher than 1).
+    The meaning of the number is loose, but the higher the better.
     """
     coord = np.round(coord).astype(int)
     coord = tuple(coord)
@@ -230,7 +248,7 @@ def _get_success(array, coord, radius=2):
     # bigval = np.percentile(array, 97)
     # success = theval / bigval
     # TODO: Think this out
-    success = np.sqrt(theval * theval2)
+    success = torch.sqrt(theval * theval2)
     return success
 
 
@@ -246,6 +264,9 @@ def _argmax2D(array):
 
 def _get_subarr(array, center, rad):
     """
+    Get a subarray around a cell in the array with wrapping around the
+    borders of the image.
+
     Parameters
     ----------
     array (ndarray)
@@ -255,27 +276,30 @@ def _get_subarr(array, center, rad):
     rad (int)
         Search radius, no radius (i.e. get the single point) implies rad == 0
     """
-    dim = 1 + 2 * rad
-    subarr = np.zeros((dim,) * 2)
-    corner = np.array(center) - rad
-    for ii in range(dim):
-        yidx = corner[0] + ii
-        yidx %= array.shape[0]
-        for jj in range(dim):
-            xidx = corner[1] + jj
-            xidx %= array.shape[1]
-            subarr[ii, jj] = array[yidx, xidx]
-    return subarr
+    tarray = torch.nn.functional.pad(
+        array.unsqueeze(0).unsqueeze(0),
+        pad=(rad, rad, rad, rad),
+        mode="circular",
+    ).squeeze()
+
+    # The center has to move due to the padding
+    center_ = (center[0] + rad, center[1] + rad)
+
+    subarray = tarray[
+        center_[0] - rad : center_[0] + rad + 1,
+        center_[1] - rad : center_[1] + rad + 1,
+    ]
+    return subarray
 
 
-def _interpolate(array, rough, rad=2):
+def _interpolate(array: torch.Tensor, rough, rad: int = 2):
     """
     Returns index that is in the array after being rounded.
 
     The result index tuple is in each of its components between zero and the
     array's shape.
     """
-    rough = np.round(rough).astype(int)
+    rough = torch.round(rough).type(torch.int64)
     surroundings = _get_subarr(array, rough, rad)
     com = _argmax_ext(surroundings, 1)
     offset = com - rad
@@ -290,40 +314,43 @@ def _interpolate(array, rough, rad=2):
     return ret
 
 
-def _argmax_ext(array, exponent):
+def _argmax_ext(array: torch.Tensor, exponent: float) -> torch.Tensor:
     """
     Calculate coordinates of the COM (center of mass) of the provided array.
 
-    Args:
-        array (ndarray): The array to be examined.
-        exponent (float or 'inf'): The exponent we power the array with. If the
-            value 'inf' is given, the coordinage of the array maximum is taken.
+    Parameters
+    ----------
+    array
+        The array to be examined.
+    exponent
+        The exponent we power the array with. If the value 'inf' is given,
+         the coordinage of the array maximum is taken.
 
-    Returns:
-        np.ndarray: The COM coordinate tuple, float values are allowed!
+    Returns
+    -------
+    The COM coordinate tuple, float values are allowed!
     """
 
     # When using an integer exponent for _argmax_ext, it is good to have the
     # neutral rotation/scale in the center rather near the edges
 
-    ret = None
-    if exponent == "inf":
+    if exponent == torch.inf:
         ret = _argmax2D(array)
     else:
-        col = np.arange(array.shape[0])[:, np.newaxis]
-        row = np.arange(array.shape[1])[np.newaxis, :]
+        col = torch.arange(array.shape[0])[:, np.newaxis]
+        row = torch.arange(array.shape[1])[np.newaxis, :]
 
         arr2 = array**exponent
         arrsum = arr2.sum()
         if arrsum == 0:
             # We have to return SOMETHING, so let's go for (0, 0)
-            return np.zeros(2)
-        arrprody = np.sum(arr2 * col) / arrsum
-        arrprodx = np.sum(arr2 * row) / arrsum
+            return torch.zeros(2)
+        arrprody = torch.sum(arr2 * col) / arrsum
+        arrprodx = torch.sum(arr2 * row) / arrsum
         ret = [arrprody, arrprodx]
         # We don't use it, but it still tells us about value distribution
 
-    return np.array(ret)
+    return torch.tensor(ret)
 
 
 def imfilter(img, low=None, high=None, cap=None):
@@ -408,40 +435,32 @@ def _xpass(shape, lo, hi):
     return res
 
 
-def _apodize(what, aporad=None, ratio=None):
+def apodize(img: torch.Tensor) -> torch.Tensor:
     """
     Given an image, it apodizes it (so it becomes quasi-seamless).
-    When ``ratio`` is None, color near the edges will converge
-    to the same colour, whereas when ratio is a float number, a blurred
-    original image will serve as background.
+    Color near the edges will converge to the same color
 
-    Args:
-        what: The original image
-        aporad (int): Radius [px], width of the band near the edges
-            that will get modified
-        ratio (float or None): When None, the apodization background will
-            be a flat color.
-            When a float number, the background will be the image itself
-            convolved with Gaussian kernel of sigma (aporad / ratio).
+    Parameters
+    ----------
+    img
+        Input img
 
-    Returns:
+    Returns
+    -------
         The apodized image
     """
-    if aporad is None:
-        mindim = min(what.shape)
-        aporad = int(mindim * 0.12)
-    apofield = get_apofield(what.shape, aporad)
-    res = what * apofield
-    if ratio is not None:
-        ratio = float(ratio)
-        bg = ndi.gaussian_filter(what, aporad / ratio, mode="wrap")
-    else:
-        bg = get_borderval(what, aporad // 2)
+
+    mindim = min(img.shape)
+    aporad = int(mindim * 0.12)
+    apofield = get_apofield(img.shape, aporad)
+    res = img * apofield
+    bg = get_borderval(img, aporad // 2)
     res += bg * (1 - apofield)
+
     return res
 
 
-def get_apofield(shape, aporad):
+def get_apofield(shape, aporad: int):
     """
     Returns an array between 0 and 1 that goes to zero close to the edges.
     """
@@ -459,25 +478,54 @@ def get_apofield(shape, aporad):
         toapp[-aporad:] = apos[-aporad:]
         vecs.append(toapp)
     apofield = np.outer(vecs[0], vecs[1])
-    return apofield
+
+    return apofield.astype(np.float32)
 
 
-def frame_img(img, mask, dst, apofield=None):
+def gaussian_kernel_1d(sigma: float, num_sigma: float = 3.0) -> torch.Tensor:
+    radius = math.ceil(sigma * num_sigma)
+    support = torch.arange(-radius, radius + 1, dtype=torch.float32)
+    kernel = Normal(loc=0, scale=sigma).log_prob(support).exp_()
+
+    return kernel.mul_(1 / kernel.sum())
+
+
+def gaussian_filter(
+    img: torch.Tensor, sigma: float, mode: str = "circular"
+) -> torch.Tensor:
+    kernel_1d = gaussian_kernel_1d(sigma)
+    padding = len(kernel_1d) // 2
+    img = F.pad(
+        img.unsqueeze(0).unsqueeze(0), (padding, padding, padding, padding), mode=mode
+    )
+    img = F.conv2d(img, weight=kernel_1d.view(1, 1, -1, 1))
+    img = F.conv2d(img, weight=kernel_1d.view(1, 1, 1, -1))
+
+    return img.squeeze(0).squeeze(0)
+
+
+def frame_img(img, transform, dst, apofield=None):
     """
-    Given an array, a mask (floats between 0 and 1), and a distance,
-    alter the area where the mask is low (and roughly within dst from the edge)
-    so it blends well with the area where the mask is high.
-    The purpose of this is removal of spurious frequencies in the image's
-    Fourier spectrum.
+    Given an array, a mask (floats between 0 and 1), and a distance, alter the area
+    where the mask is low (and roughly within dst from the edge) so it blends well
+    with the area where the mask is high. The purpose of this is removal of spurious
+    frequencies in the image's Fourier spectrum.
 
-    Args:
-        img (np.array): What we want to alter
-        maski (np.array): The indicator what can be altered (0)
-            and what can not (1)
-        dst (int): Parameter controlling behavior near edges, value could be
-            probably deduced from the mask.
+    Parameters
+    ----------
+    img
+        What we want to alter
+    maski
+        The indicator what can be altered (0) and what can not (1)
+    dst
+        Parameter controlling behavior near edges, value could be probably deduced
+        from the mask.
     """
-    import scipy.ndimage as ndimg
+    # Order of mask should be always 1 - higher values produce strange results.
+    mask = transform_img(torch.ones_like(img), transform, 0, "nearest", invert=False)
+
+    # This removes some weird artifacts
+    mask[mask > 0.8] = 1.0
 
     radius = dst / 1.8
 
@@ -491,8 +539,8 @@ def frame_img(img, mask, dst, apofield=None):
     krad = krad0
 
     while krad < krad_max:
-        convimg = ndimg.gaussian_filter(convimg0 * convmask0, krad, mode="wrap")
-        convmask = ndimg.gaussian_filter(convmask0, krad, mode="wrap")
+        convimg = gaussian_filter(convimg0 * convmask0, krad, mode="circular")
+        convmask = gaussian_filter(convmask0, krad, mode="circular")
         convimg /= convmask
 
         convimg = convimg * (convmask - convmask0) + convimg0 * (
@@ -512,7 +560,7 @@ def frame_img(img, mask, dst, apofield=None):
     return ret
 
 
-def get_borderval(img, radius=None):
+def get_borderval(img: torch.Tensor, radius: Optional[int] = None) -> float:
     """
     Given an image and a radius, examine the average value of the image
     at most radius pixels from the edge
@@ -520,14 +568,15 @@ def get_borderval(img, radius=None):
     if radius is None:
         mindim = min(img.shape)
         radius = max(1, mindim // 20)
-    mask = np.zeros_like(img, dtype=bool)
+    mask = torch.zeros_like(img, dtype=torch.bool)
     mask[:, :radius] = True
     mask[:, -radius:] = True
     mask[:radius, :] = True
     mask[-radius:, :] = True
 
-    mean = np.median(img[mask])
-    return mean
+    median = torch.median(img[mask]).item()
+
+    return median
 
 
 def transform_2d_coord_arrays(homography, in_coords):
@@ -536,3 +585,108 @@ def transform_2d_coord_arrays(homography, in_coords):
     out_coordinates = (out_coordinates / out_coordinates[:, :, 2][:, :, None])[:, :, :2]
 
     return out_coordinates
+
+
+def map_coordinates(pixel_indices, field, cval=0.0, mode="bilinear"):
+    pixel_indices = pixel_indices.clone()
+    yx_size = field.shape[-1], field.shape[-2]
+    for i in range(2):
+        pixel_indices[:, :, i] = ((pixel_indices[:, :, i]) / (yx_size[i] - 1) * 2) - 1
+
+    out_of_bounds_mask = ((pixel_indices > 1) | (pixel_indices < -1)).any(dim=2)
+
+    field = torch.nn.functional.grid_sample(
+        field.unsqueeze(0).unsqueeze(0),
+        pixel_indices.unsqueeze(0),
+        mode=mode,
+        padding_mode="zeros",
+        align_corners=True,
+    ).squeeze()
+
+    field[out_of_bounds_mask] = cval
+
+    return field.squeeze()
+
+
+def similarity_matrix(scale: float, angle: float, tvec: Iterable) -> np.ndarray:
+    # Rotation
+    angle = np.deg2rad(angle)
+    c, s = np.cos(angle), np.sin(angle)
+    r_matrix = np.identity(3)
+    r_matrix[:2, :2] = np.array([[c, -s], [s, c]])
+
+    # Scaling
+    s_matrix = np.identity(3)
+    s_matrix[0, 0] = scale
+    s_matrix[1, 1] = scale
+
+    # Translation
+    t_matrix = np.identity(3)
+    t_matrix[:2, 2] = tvec
+
+    return t_matrix @ r_matrix @ s_matrix
+
+
+def transform_img(
+    img: torch.Tensor,
+    transformation: np.ndarray,
+    bgval: Optional[float] = None,
+    mode: str = "bilinear",
+    invert: bool = False,
+) -> torch.Tensor:
+    """
+    Return translation vector to register images.
+
+    Notes
+    -----
+    The transformation is to be understand on the coordinate axis of natural to an
+    image array. That is, the origin of coordinates is on the top left with the y axis
+    going down and the x axis to the right. Rotations go from x to y and therefore
+    a positive rotation angle will result in an anticlockwise rotation from the point
+    of view of the user when plotting the image but in fact its a clockwise rotation
+    from the point of view of the coordinate system.
+
+    Parameters
+    ----------
+    img
+        What will be transformed.
+        If a 3D array is passed, it is treated in a manner in which RGB
+        images are supposed to be handled - i.e. assume that coordinates
+        are (Y, X, channels).
+        Complex images are handled in a way that treats separately
+        the real and imaginary parts.
+    mode
+        `nearest` or `bilinear`. This are the modes supported by `grid_sample`
+    bgval
+        Shade of the background (filling during transformations)
+        If None is passed, :func:`imreg_dft.utils.get_borderval` with
+        radius of 5 is used to get it.
+
+    Returns
+    -------
+    The transformed image
+
+    """
+    if invert:
+        transformation = np.linalg.inv(transformation)
+
+    if bgval is None:
+        bgval = get_borderval(img)
+
+    transformed_coords = transform_2d_coord_arrays(
+        np.linalg.inv(transformation),
+        np.dstack(
+            np.meshgrid(np.arange(img.shape[1]), np.arange(img.shape[0]), indexing="xy")
+        ),
+    )
+    transformed_coords = torch.tensor(transformed_coords).type(torch.float32)
+    slave_transformed = map_coordinates(
+        transformed_coords,
+        img,
+        cval=float(bgval),
+        mode=mode,
+    )
+
+    dest = slave_transformed
+
+    return dest

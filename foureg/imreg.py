@@ -33,61 +33,69 @@
 """
 FFT based image registration. --- main functions
 """
+from copy import deepcopy
+from typing import Any, Callable, Optional
+
 import numpy as np
-import numpy.fft as fft
-from scipy.ndimage import map_coordinates
+import torch
 
 import foureg.utils as utils
 
+from .constraints import Constraints
+from .result import Result
+
 EXCESS_CONST = 1.1
+PI = torch.pi
 
 
-def _logpolar_filter(shape):
+def _logpolar_filter(shape: tuple[int, int]):
     """
     Make a radial cosine filter for the logpolar transform.
 
     This filter suppresses low frequencies and completely removes the zero freq.
     """
-    yy = np.linspace(-np.pi / 2.0, np.pi / 2.0, shape[0])[:, np.newaxis]
-    xx = np.linspace(-np.pi / 2.0, np.pi / 2.0, shape[1])[np.newaxis, :]
+    yy = torch.linspace(-PI / 2.0, PI / 2.0, shape[0])[:, None]
+    xx = torch.linspace(-PI / 2.0, PI / 2.0, shape[1])[None, :]
     # Supressing low spatial frequencies is a must when using log-polar
     # transform. The scale stuff is poorly reflected with low freqs.
-    rads = np.sqrt(yy**2 + xx**2)
-    filt = 1.0 - np.cos(rads) ** 2
+    rads = torch.sqrt(yy**2 + xx**2)
+    filt = 1.0 - torch.cos(rads) ** 2
     # vvv This doesn't really matter, very high freqs are not too usable anyway
-    filt[np.abs(rads) > np.pi / 2] = 1
+    filt[torch.abs(rads) > PI / 2] = 1
 
     return filt
 
 
-def _get_pcorr_shape(shape):
+def _get_pcorr_shape(shape: tuple[int, int]) -> tuple[int, int]:
     ret = (int(max(shape) * 1.0),) * 2
 
     return ret
 
 
-def _get_ang_scale(ims, exponent="inf", constraints=None):
+def _get_ang_scale(
+    ims: list[torch.Tensor],
+    exponent: float = torch.inf,
+    constraints: Constraints = Constraints(),
+) -> tuple[float, float]:
     """
     Given two images, return their scale and angle difference.
 
     Parameters
     ----------
-    ims (2-tuple-like of 2D ndarrays)
+    ims
         The images
-    exponent (float or 'inf')
+    exponent
         The exponent stuff, see :func:`similarity` constraints (dict, optional)
 
     Returns
     -------
-    tuple: Scale, angle.
-
-    Describes the relationship of the subject image to the first one.
+    Scale and angle tuple
     """
     assert len(ims) == 2, "Only two images are supported as input"
     shape = ims[0].shape
 
-    ims_apod = [utils._apodize(im) for im in ims]
-    dfts = [fft.fftshift(fft.fft2(im)) for im in ims_apod]
+    ims_apod = [utils.apodize(im) for im in ims]
+    dfts = [torch.fft.fftshift(torch.fft.fft2(im)) for im in ims_apod]
     filt = _logpolar_filter(shape)
     dfts = [dft * filt for dft in dfts]
 
@@ -96,15 +104,12 @@ def _get_ang_scale(ims, exponent="inf", constraints=None):
 
     pcorr_shape = _get_pcorr_shape(shape)
     log_base = _get_log_base(shape, pcorr_shape[1])
-    stuffs = [_logpolar(np.abs(dft), pcorr_shape, log_base) for dft in dfts]
+    stuffs = [_logpolar(torch.abs(dft), pcorr_shape, log_base) for dft in dfts]
 
     (arg_ang, arg_rad), _ = _phase_correlation(
         stuffs[0],
         stuffs[1],
-        utils.argmax_angscale,
-        log_base,
-        exponent,
-        constraints,
+        lambda img: utils.argmax_angscale(img, log_base, exponent, constraints),
     )
 
     angle = -np.pi * arg_ang / float(pcorr_shape[0])
@@ -120,10 +125,16 @@ def _get_ang_scale(ims, exponent="inf", constraints=None):
             "Images are not compatible. Scale change %g too big to be true." % scale
         )
 
-    return scale, angle
+    return scale.item(), angle.item()
 
 
-def translation(im0, im1, filter_pcorr=0, odds=1, constraints=None):
+def translation(
+    im0: torch.Tensor,
+    im1: torch.Tensor,
+    constraints: Constraints,
+    filter_pcorr: int = 0,
+    odds: float = 1,
+) -> dict[str, Any]:
     """
     Return translation vector to register images.
 
@@ -131,30 +142,32 @@ def translation(im0, im1, filter_pcorr=0, odds=1, constraints=None):
 
     Parameters
     ----------
-    im0 (2D numpy array)
+    im0
         The first (template) image
-    im1 (2D numpy array)
+    im1
         The second (subject) image
-    filter_pcorr (int):
+    filter_pcorr
         Radius of the minimum spectrum filter for translation detection, use the
         filter when detection fails. Values > 3 are likely not useful.
-    constraints (dict or None): Specify preference of seeked values.
+    constraints
+        Specify preference of seeked values.
         For more detailed documentation, refer to :func:`similarity`.
         The only difference is that here, only keys ``tx`` and/or ``ty``
         (i.e. both or any of them or none of them) are used.
-    odds (float): The greater the odds are, the higher is the preferrence of the
+    odds
+        The greater the odds are, the higher is the preferrence of the
         angle + 180 over the original angle. Odds of -1 are the same as inifinity.
         The value 1 is neutral, the converse of 2 is 1 / 2 etc.
 
     Returns
     -------
-    dict: Contains following keys: ``angle``, ``tvec`` (Y, X), and ``success``.
+    A dict that contains following keys: ``angle``, ``tvec`` (Y, X), and ``success``.
     """
     # We estimate translation for the original image...
-    tvec, succ = _translation(im0, im1, filter_pcorr, constraints)
+    tvec, succ = _translation(im0, im1, constraints, filter_pcorr)
     # ... and for the 180-degrees rotated image (the rotation estimation
     # doesn't distinguish rotation of x vs x + 180deg).
-    tvec2, succ2 = _translation(im0, utils.rot180(im1), filter_pcorr, constraints)
+    tvec2, succ2 = _translation(im0, utils.rot180(im1), constraints, filter_pcorr)
 
     pick_rotated = succ2 * odds > succ or odds == -1
     if pick_rotated:
@@ -165,7 +178,7 @@ def translation(im0, im1, filter_pcorr=0, odds=1, constraints=None):
     return ret
 
 
-def _get_precision(shape, scale=1):
+def _get_precision(shape: tuple[int, int], scale: float = 1) -> tuple[float, float]:
     """
     Given the parameters of the log-polar transform, get width of the interval
     where the correct values are.
@@ -188,18 +201,19 @@ def _get_precision(shape, scale=1):
     return Dangle, Dscale
 
 
-def _similarity(
-    im0,
-    im1,
-    numiter=1,
-    order=3,
-    constraints=None,
-    filter_pcorr=0,
-    exponent="inf",
-    bgval=None,
-):
+def similarity(
+    im0: torch.Tensor,
+    im1: torch.Tensor,
+    numiter: int = 1,
+    mode: str = "bilinear",
+    constraints: Constraints = Constraints(),
+    filter_pcorr: int = 0,
+    exponent: float = torch.inf,
+) -> Result:
     """
-    This function takes some input and returns mutual rotation, scale and translation.
+    Return similarity transformed image im1 and transformation parameters.
+    Transformation parameters are: isotropic scale factor, rotation angle (in
+    degrees), and translation vector.
 
     It does these things during the process:
     * Handles correct constraints handling (defaults etc.).
@@ -208,10 +222,56 @@ def _similarity(
     * Performs translation determination.
     * Calculates precision.
 
+    A similarity transformation is an affine transformation with isotropic scale and
+    without shear.
+
+    Parameters
+    ----------
+    im0
+        The first (template) image
+    im1
+        The second (subject) image
+    numiter
+        How many times to iterate when determining scale and rotation
+    mode
+        Interpolation mode passed to grid_sample
+    filter_pcorr
+        Radius of a spectrum filter for translation detection
+    exponent
+        The exponent value used during processing. Refer to the docs for a thorough
+        explanation. Generally, pass "inf" when feeling conservative. Otherwise,
+        experiment, values below 5 are not even supposed to work.
+    constraint
+        Specify preference of seeked values.
+        Pass None (default) for no constraints, otherwise pass a dict with
+        keys ``angle``, ``scale``, ``tx`` and/or ``ty`` (i.e. you can pass
+        all, some of them or none of them, all is fine). The value of a key
+        is supposed to be a mutable 2-tuple (e.g. a list), where the first
+        value is related to the constraint center and the second one to
+        softness of the constraint (the higher is the number,
+        the more soft a constraint is).
+
+        More specifically, constraints may be regarded as weights in form of a shifted
+        Gaussian curve. However, for precise meaning of keys and values, see the
+        documentation section `constraints`. Names of dictionary keys map to
+        names of command-line arguments.
+
     Returns
     -------
-    Dictionary with results.
+    Similarity transformation and associated uncertainties
+
+    Note
+    ----
+    There are limitations
+
+    * Scale change must be less than 2.
+    * No subpixel precision (but you can use *resampling* to get around this).
     """
+    im1 = torch.Tensor(im1).type(torch.float32)
+    im0 = torch.Tensor(im0).type(torch.float32)
+
+    bgval = utils.get_borderval(im1, 5)
+    # ims_torch = [torch.Tensor(img.copy()).type(torch.float32) for img in ims]
     if bgval is None:
         bgval = utils.get_borderval(im1, 5)
 
@@ -226,38 +286,42 @@ def _similarity(
     angle = 0.0
     im2 = im1
 
-    constraints_default = dict(angle=[0, None], scale=[1, None])
-    if constraints is None:
-        constraints = constraints_default
-
-    # We guard against case when caller passes only one constraint key.
-    # Now, the provided ones just replace defaults.
-    constraints_default.update(constraints)
-    constraints = constraints_default
-
-    # During iterations, we have to work with constraints too.
-    # So we make the copy in order to leave the original intact
-    constraints_dynamic = constraints.copy()
-    constraints_dynamic["scale"] = list(constraints["scale"])
-    constraints_dynamic["angle"] = list(constraints["angle"])
+    # get a copy of the constraints so that we can modify them during the iterations
+    constraints_dynamic = deepcopy(constraints)
 
     for _ in range(numiter):
         newscale, newangle = _get_ang_scale([im0, im2], exponent, constraints_dynamic)
         scale *= newscale
         angle += newangle
 
-        constraints_dynamic["scale"][0] /= newscale
-        constraints_dynamic["angle"][0] -= newangle
+        constraints_dynamic.scale = (
+            constraints_dynamic.scale[0] / newscale,
+            constraints_dynamic.scale[1],
+        )
+        constraints_dynamic.angle = (
+            constraints_dynamic.angle[0] + newangle,
+            constraints_dynamic.angle[1],
+        )
 
-        transformation = similarity_matrix(scale, angle, (0, 0))
-        im2 = transform_img(im1, transformation, bgval=bgval, order=order)
+        # transform_img understand the angle the other way around hence the minus
+        # sign below
+        transformation = utils.similarity_matrix(scale, -angle, (0, 0))
+
+        # False because we're transforming the slave to be closer to the master
+        im2 = utils.transform_img(
+            im1, transformation, bgval=bgval, mode=mode, invert=False
+        )
 
     # Here we look how is the turn-180
-    target, stdev = constraints.get("angle", (0, None))
+    target, stdev = constraints.angle
     odds = _get_odds(angle, target, stdev)
 
     # now we can use pcorr to guess the translation
-    res = translation(im0, im2, filter_pcorr, odds, constraints)
+    res = translation(im0, im2, constraints, filter_pcorr, odds)
+
+    # Flipping tvec is required because transform_img has a different
+    # understanding of what is xy wrt the output of translation
+    res["tvec"] = res["tvec"].flip(dims=(0,))
 
     # The log-polar transform may have got the angle wrong by 180 degrees.
     # The phase correlation can help us to correct that
@@ -266,111 +330,39 @@ def _similarity(
 
     Dangle, Dscale = _get_precision(shape, scale)
 
-    affine = similarity_matrix(scale, res["angle"], res["tvec"])
-
-    # 0.25 because we go subpixel now
-    res = {"transformation": affine, "Dscale": Dscale, "Dangle": Dangle, "Dt": 0.25}
-
-    return res
-
-
-def similarity(
-    im0,
-    im1,
-    numiter=1,
-    order=3,
-    constraints=None,
-    filter_pcorr=0,
-    exponent="inf",
-):
-    """
-    Return similarity transformed image im1 and transformation parameters.
-    Transformation parameters are: isotropic scale factor, rotation angle (in
-    degrees), and translation vector.
-
-    A similarity transformation is an affine transformation with isotropic scale and
-    without shear.
-
-    Parameters
-    ----------
-    im0 (2D numpy array)
-        The first (template) image
-    im1 (2D numpy array)
-        The second (subject) image
-    numiter (int)
-        How many times to iterate when determining scale and rotation
-    order (int):
-        Order of approximation (when doing transformations). 1 = linear, 3 = cubic etc.
-    filter_pcorr (int):
-        Radius of a spectrum filter for translation detection
-    exponent (float or 'inf'):
-        The exponent value used during processing. Refer to the docs for a thorough
-        explanation. Generally, pass "inf" when feeling conservative. Otherwise,
-        experiment, values below 5 are not even supposed to work.
-    constraints (dict or None): Specify preference of seeked values.
-        Pass None (default) for no constraints, otherwise pass a dict with
-        keys ``angle``, ``scale``, ``tx`` and/or ``ty`` (i.e. you can pass
-        all, some of them or none of them, all is fine). The value of a key
-        is supposed to be a mutable 2-tuple (e.g. a list), where the first
-        value is related to the constraint center and the second one to
-        softness of the constraint (the higher is the number,
-        the more soft a constraint is).
-
-        More specifically, constraints may be regarded as weights in form of a shifted
-        Gaussian curve. However, for precise meaning of keys and values, see the
-        documentation section :ref:`constraints`. Names of dictionary keys map to
-        names of command-line arguments.
-
-    Returns
-    -------
-    dict: Contains following keys: ``scale``, ``angle``, ``tvec`` (Y, X),
-    ``success`` and ``timg`` (the transformed subject image)
-
-    Note
-    ----
-    There are limitations
-
-    * Scale change must be less than 2.
-    * No subpixel precision (but you can use *resampling* to get around this).
-    """
-    bgval = utils.get_borderval(im1, 5)
-
-    res = _similarity(
-        im0, im1, numiter, order, constraints, filter_pcorr, exponent, bgval
+    # transform_img understand the angle the other way around hence the minus sign
+    # below
+    # dt 0.25 because we go subpixel now (???)
+    res = Result(
+        angle=-res["angle"],
+        scale=scale,
+        tvec=res["tvec"],
+        dscale=Dscale,
+        dangle=Dangle,
+        dt=0.25,
     )
-    print(res)
 
-    im2 = transform_img(im1, res["transformation"], bgval, order)
-    # Order of mask should be always 1 - higher values produce strange results.
-    imask = transform_img(np.ones_like(im1), res["transformation"], 0, 1)
-    # This removes some weird artifacts
-    imask[imask > 0.8] = 1.0
-
-    # Framing here = just blending the im2 with its BG according to the mask
-    im3 = utils.frame_img(im2, imask, 10)
-
-    res["timg"] = im3
     return res
 
 
-def _get_odds(angle, target, stdev):
+def _get_odds(angle: float, target: float, stdev: float) -> float:
     """
     Determine whether we are more likely to choose the angle, or angle + 180°
 
     Parameters
     ----------
-    angle (float, degrees)
-        The base angle.
-    target (float, degrees)
+    angle
+        The base angle in degrees.
+    target
         The angle we think is the right one. Typically, we take this from constraints.
-    stdev (float, degrees)
+        In degrees.
+    stdev
         The relevance of the target value, typically taken from constraints.
 
     Returns
     -------
-    float: The greater the odds are, the higher is the preferrence
-        of the angle + 180 over the original angle. Odds of -1 are the same
-        as inifinity.
+    float: The greater the odds are, the higher is the preferrence of the angle + 180
+        ver the original angle. Odds of -1 are the same as inifinity.
     """
     ret = 1
     if stdev is not None:
@@ -390,22 +382,33 @@ def _get_odds(angle, target, stdev):
                 ret = 0
         else:
             ret = odds1 / odds0
+
     return ret
 
 
-def _translation(im0, im1, filter_pcorr=0, constraints=None):
+def _translation(
+    im0: torch.Tensor,
+    im1: torch.Tensor,
+    constraints: Constraints,
+    filter_pcorr: int = 0,
+) -> tuple[torch.Tensor, Any]:
     """
     The plain wrapper for translation phase correlation, no big deal.
     """
     # Apodization and pcorr don't play along
-    # im0, im1 = [utils._apodize(im, ratio=1) for im in (im0, im1)]
     ret, succ = _phase_correlation(
-        im0, im1, utils.argmax_translation, filter_pcorr, constraints
+        im0,
+        im1,
+        lambda img: utils.argmax_translation(img, filter_pcorr, constraints),
     )
     return ret, succ
 
 
-def _phase_correlation(im0, im1, callback=None, *args):
+def _phase_correlation(
+    im0: torch.Tensor,
+    im1: torch.Tensor,
+    callback: Callable[[torch.Tensor], Any],
+) -> tuple[torch.Tensor, Any]:
     """
     Computes phase correlation between im0 and im1
 
@@ -423,116 +426,27 @@ def _phase_correlation(im0, im1, callback=None, *args):
     tuple: The translation vector (Y, X). Translation vector of (0, 0)
     means that the two images match.
     """
-    if callback is None:
-        callback = utils._argmax2D
-
     # TODO: Implement some form of high-pass filtering of PHASE correlation
-    f0, f1 = [fft.fft2(arr) for arr in (im0, im1)]
+    f0, f1 = [torch.fft.fft2(arr) for arr in (im0, im1)]
     # spectrum can be filtered (already),
     # so we have to take precaution against dividing by 0
-    eps = abs(f1).max() * 1e-15
+    eps = torch.abs(f1).max() * 1e-15
     # cps == cross-power spectrum of im0 and im1
-    cps = abs(fft.ifft2((f0 * f1.conjugate()) / (abs(f0) * abs(f1) + eps)))
+    cps = torch.abs(torch.fft.ifft2((f0 * f1.conj()) / (abs(f0) * abs(f1) + eps)))
     # scps = shifted cps
-    scps = fft.fftshift(cps)
+    scps = torch.fft.fftshift(cps)
 
-    (t0, t1), success = callback(scps, *args)
-    ret = np.array((t0, t1))
+    (t0, t1), success = callback(scps)
+    ret = torch.tensor((t0, t1))
 
     t0 -= f0.shape[0] // 2
     t1 -= f0.shape[1] // 2
 
-    ret -= np.array(f0.shape, int) // 2
+    ret -= torch.tensor(f0.shape) // 2
     return ret, success
 
 
-def transform_img(
-    img, transformation, bgval=None, order=1, mode="constant", invert=False
-):
-    """
-    Return translation vector to register images.
-
-    Parameters
-    ----------
-    img (2D or 3D numpy array)
-        What will be transformed.
-        If a 3D array is passed, it is treated in a manner in which RGB
-        images are supposed to be handled - i.e. assume that coordinates
-        are (Y, X, channels).
-        Complex images are handled in a way that treats separately
-        the real and imaginary parts.
-    scale (float)
-        The scale factor (scale > 1.0 means zooming in)
-    angle (float)
-        Degrees of rotation (clock-wise)
-    tvec (2-tuple)
-        Pixel translation vector, Y and X component.
-    mode (string)
-        The transformation mode (refer to e.g.
-        :func:`scipy.ndimage.shift` and its kwarg ``mode``).
-    bgval (float)
-        Shade of the background (filling during transformations)
-        If None is passed, :func:`imreg_dft.utils.get_borderval` with
-        radius of 5 is used to get it.
-    order (int)
-        Order of approximation (when doing transformations). 1 =
-        linear, 3 = cubic etc. Linear works surprisingly well.
-
-    Returns
-    -------
-    np.ndarray: The transformed img, may have another
-    i.e. (bigger) shape than the source.
-    """
-    if invert:
-        transformation = np.linalg.inv(transformation)
-
-    if bgval is None:
-        bgval = utils.get_borderval(img)
-
-    if img.ndim == 3:
-        # A bloody painful special case of RGB images
-        ret = np.empty_like(img)
-        for idx in range(img.shape[2]):
-            sli = (slice(None), slice(None), idx)
-            ret[sli] = transform_img(img[sli], transformation, bgval, order, mode)
-        return ret
-
-    transformed_coords = utils.transform_2d_coord_arrays(
-        np.linalg.inv(transformation),
-        np.dstack(
-            np.meshgrid(np.arange(img.shape[0]), np.arange(img.shape[1]), indexing="ij")
-        ),
-    )
-    n_pixels = np.prod(img.shape)
-    transformed_coords = transformed_coords.reshape(n_pixels, 2)
-    slave_transformed = map_coordinates(img, transformed_coords.T, cval=bgval)
-    slave_transformed = np.reshape(slave_transformed, img.shape)
-
-    dest = slave_transformed
-
-    return dest
-
-
-def similarity_matrix(scale, angle, tvec):
-    # Rotation
-    angle = np.deg2rad(angle)
-    c, s = np.cos(angle), np.sin(angle)
-    r_matrix = np.identity(3)
-    r_matrix[:2, :2] = np.array([[c, -s], [s, c]])
-
-    # Scaling
-    s_matrix = np.identity(3)
-    s_matrix[0, 0] = scale
-    s_matrix[1, 1] = scale
-
-    # Translation
-    t_matrix = np.identity(3)
-    t_matrix[:2, 2] = tvec
-
-    return t_matrix @ r_matrix @ s_matrix
-
-
-def _get_log_base(shape, new_r):
+def _get_log_base(shape: tuple[int, int], new_r: float) -> float:
     """
     Basically common functionality of `_logpolar` and `_get_ang_scale`
 
@@ -543,18 +457,20 @@ def _get_log_base(shape, new_r):
     ----------
     shape
         Shape of the original image.
-    new_r: float
+    new_r
         The r-size of the log-polar transform array dimension.
 
     Returns
     -------
-    float: Base of the log-polar transform.
+    Base of the log-polar transform.
     The following holds:
-    `log\_base =
-        \exp( \ln [ \mathit{spectrum\_dim} ] / \mathit{loglpolar\_scale\_dim} )`,
+    `log\\_base =
+        \\exp( \\ln [ \\mathit{spectrum\\_dim} ] / \\mathit{loglpolar\\_scale\\_dim} )`,
     or the equivalent
-        `log\_base^{\mathit{loglpolar\_scale\_dim}} = \mathit{spectrum\_dim}`.
+        `log\\_base^{\\mathit{loglpolar\\_scale\\_dim}} = \\mathit{spectrum\\_dim}`.
     """
+    import math
+
     # The highest radius we have to accomodate is 'old_r',
     # However, we cut some parts out as only a thin part of the spectra has
     # these high frequencies
@@ -562,11 +478,16 @@ def _get_log_base(shape, new_r):
     # We are radius, so we divide the diameter by two.
     old_r /= 2.0
     # we have at most 'new_r' of space.
-    log_base = np.exp(np.log(old_r) / new_r)
+    log_base = math.exp(math.log(old_r) / new_r)
     return log_base
 
 
-def _logpolar(image, shape, log_base, bgval=None):
+def _logpolar(
+    image: torch.Tensor,
+    shape: tuple[int, int],
+    log_base: float,
+    bgval: Optional[float] = None,
+) -> torch.Tensor:
     """
     Return log-polar transformed image.
     Takes into account anisotropicity of the freq spectrum of rectangular images
@@ -587,13 +508,13 @@ def _logpolar(image, shape, log_base, bgval=None):
     The transformed image
     """
     if bgval is None:
-        bgval = np.percentile(image, 1)
-    imshape = np.array(image.shape)
+        bgval = torch.quantile(image, 0.99).item()
+    imshape = image.shape
     center = imshape[0] / 2.0, imshape[1] / 2.0
     # 0 .. pi = only half of the spectrum is used
     theta = utils._get_angles(shape)
     radius_x = utils._get_lograd(shape, log_base)
-    radius_y = radius_x.copy()
+    radius_y = radius_x.clone()
     ellipse_coef = imshape[0] / float(imshape[1])
     # We have to acknowledge that the frequency spectrum can be deformed
     # if the image aspect ratio is not 1.0
@@ -601,9 +522,10 @@ def _logpolar(image, shape, log_base, bgval=None):
     # scale in x is shrunk.
     radius_x /= ellipse_coef
 
-    y = radius_y * np.sin(theta) + center[0]
-    x = radius_x * np.cos(theta) + center[1]
-    output = np.empty_like(y)
-    map_coordinates(image, [y, x], output=output, order=3, mode="constant", cval=bgval)
+    y = radius_y * torch.sin(theta) + center[0]
+    x = radius_x * torch.cos(theta) + center[1]
 
-    return output
+    yx = torch.Tensor(torch.dstack([x, y]))
+    output_t = utils.map_coordinates(yx, image, bgval)
+
+    return output_t

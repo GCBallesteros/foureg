@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "foureg"
-version = "0.1.0"
+version = "1.0.0"
 description = "Fourier transform based image registration"
 authors = ["Guillem Ballesteros <guillem@maxwellrules.com>"]
 readme = "README.md"
@@ -27,7 +27,7 @@ classifiers = [
 [tool.poetry.dependencies]
 python = ">=3.8,<3.12"
 numpy = "^1.21"
-scipy = "^1.7"
+torch = "^2.0.1"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.3.1"
