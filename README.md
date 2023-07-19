@@ -6,10 +6,6 @@ Image registration using discrete Fourier transform.
 Given two images, `foureg` calculates a similarity transformation that
 transforms one image into the other.
 
-NOTE
-----
-THIS IS STILL WIP AND INTERFACES MAY CHANGE WITHOU NOTICE
-
 Example
 -------
 The example transforms an image with a user defined transformation and then rediscovers
@@ -66,8 +62,8 @@ This is a fork of the [imreg_dft](https://github.com/matejak/imreg_dft) borned o
 desire to achieve the following goals:
 - Ability to return the final transformation in matrix form as opposed to the angle,
 translation and scaling factor separately. The original code makes obtaining that
-matrix really hard because it does some unorthodox resizings when performing the
-image transformations.
+matrix really hard because it does it performs using scipy in  away that each transformation
+resizes the image.
 - Better performance powered by pytorch
 - A more focused codebase. The only goal here is to estimate similarity transformations
 between pairs of images.
