@@ -109,6 +109,6 @@ def test_subpixel_edge():
 
 def test_subpixel_crazy():
     anarr = np.zeros((4, 5))
-    first_guess = (0, 0)
-    second_guess = utils._interpolate(anarr, first_guess, rad=2)
-    assert np.alltrue(second_guess < anarr.shape)
+    first_guess = torch.tensor((0, 0))
+    second_guess = utils._interpolate(torch.as_tensor(anarr), first_guess, rad=2)
+    assert np.alltrue(second_guess.numpy() < (anarr.shape))
